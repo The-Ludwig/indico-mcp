@@ -2,9 +2,11 @@
 Async HTTP client for the Indico HTTP Export API and REST API.
 
 Indico Export API pattern:  GET /export/{resource}.json?{params}
-Indico REST API pattern:     GET /api/{path}?{params}
+Indico REST API pattern:     GET /api/{path}?{params}  (write operations only)
 
-Authentication: Authorization: Bearer <token>  (optional for public instances)
+Authentication: Authorization: Bearer <token>
+  - Token must have the 'legacy_api' scope to access /export/ read endpoints.
+  - Create tokens at: <indico-url>/user/tokens/
 """
 
 import httpx
@@ -39,9 +41,9 @@ class IndicoClient:
         """
         GET /export/{resource}.json
 
-        resource examples: "categ/0", "event/12345", "event/12345/contributions"
+        resource examples: "categ/269", "event/9531", "event/search/OKC"
+        Requires 'legacy_api' scope on the Bearer token.
         """
-        # Remove None values so they don't end up as "None" strings
         clean_params = {k: v for k, v in params.items() if v is not None}
         url = f"{self._base_url}/export/{resource}.json"
         try:
@@ -55,13 +57,16 @@ class IndicoClient:
             )
         if resp.status_code == 403:
             raise IndicoError(
-                "Access denied. The token may lack required scopes (legacy_api).", 403
+                "Access denied. The token may lack the 'legacy_api' scope.", 403
             )
         if resp.status_code == 404:
             raise IndicoError(f"Resource not found: {resource}", 404)
-        if not resp.is_success:
+        if not resp.is_success or "text/html" in resp.headers.get("content-type", ""):
             raise IndicoError(
-                f"Indico returned HTTP {resp.status_code} for {url}", resp.status_code
+                "Indico returned HTML instead of JSON. "
+                "Ensure the token has the 'Classic API' scope enabled "
+                f"(My Profile → Personal Tokens on {self._base_url}).",
+                resp.status_code,
             )
 
         return resp.json()
@@ -69,8 +74,6 @@ class IndicoClient:
     async def api(self, path: str, **params: object) -> dict:
         """
         GET /api/{path}
-
-        path examples: "search/", "categories/123/"
         """
         clean_params = {k: v for k, v in params.items() if v is not None}
         url = f"{self._base_url}/api/{path.lstrip('/')}"

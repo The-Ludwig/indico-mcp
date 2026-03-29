@@ -63,10 +63,13 @@ INDICO_SU_TOKEN=indp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ### Getting a token
 
 1. Log in to your Indico instance
-2. Go to **My Profile → HTTP API** (or `/user/preferences/api`)
-3. Click **Create API key**
-4. Copy the token (starts with `indp_`)
-5. Required scope: `legacy_api`
+2. Go to **My Profile → Personal Tokens** (or `/user/tokens/`)
+3. Click **Create token**
+4. Give it a name and enable the **Classic API (read)** scope — this grants read access to the event export API
+5. If you also need write access (creating events, bookings), enable **Classic API (read and write)** instead
+6. Copy the generated token (starts with `indp_`)
+
+> **Note on scope naming:** The scope is labelled "Classic API" in the UI but this refers to Indico's HTTP Export API (`/export/`), which is the only way to programmatically read event and contribution data. Despite the name, using it with a modern Bearer token (`indp_...`) is the current recommended approach — the deprecated system is the old API *key* (a separate, shorter token found under My Profile → HTTP API).
 
 ## Connecting to Claude
 
@@ -128,7 +131,7 @@ list_category_info(category_id=0, instance="su")
 
 ## How it works
 
-The server uses the [Indico HTTP Export API](https://docs.getindico.io/en/stable/http-api/) (`/export/`) with `detail=contributions` and `detail=sessions` query parameters to retrieve structured agenda data. Authentication uses a standard `Authorization: Bearer <token>` header. The newer REST search API (`/api/search/`) is used for keyword search where available, with automatic fallback to the legacy title-search endpoint.
+The server uses the [Indico HTTP Export API](https://docs.getindico.io/en/stable/http-api/) (`/export/`) with `detail=contributions` and `detail=sessions` query parameters to retrieve structured agenda data. Authentication uses a standard `Authorization: Bearer <token>` header. The `/api/` endpoints in Indico are write-only (POST); all read operations go through `/export/`.
 
 ## License
 
