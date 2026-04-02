@@ -15,11 +15,11 @@ Works with any Indico instance — configure multiple instances simultaneously a
 | `search_category_events` | List events in a category, filtered by date range and keyword |
 | `get_category_contributions` | All contributions from every event in a category within a date range, in a single API call |
 | `get_event_details` | Full event metadata including all contributions |
-| `get_event_contributions` | Flat list of contributions: speakers, abstract, duration, track, session |
+| `get_event_contributions` | Paginated contributions (`items` + `pagination`): speakers, abstract, duration, track, session |
 | `get_event_sessions` | Session structure with nested contributions (full agenda view) |
 | `search_events_by_keyword` | Full-text search across events |
 | `list_category_info` | Category name, description, and direct subcategories with names |
-| `list_event_attachments` | List all file attachments (slides, papers, minutes) for an event or contribution |
+| `list_event_attachments` | Paginated attachments (`items` + `pagination`) for an event or contribution |
 | `download_attachment` | Download an attachment file to disk given its download URL |
 
 All tools accept an optional `instance` parameter to select which Indico server to query.
@@ -123,8 +123,11 @@ search_category_events(from_date="2025-04-01", to_date="2025-04-30")
 # Events in a specific category on CERN Indico
 search_category_events(category_id=72, instance="cern")
 
-# All contributions for a meeting, with speakers and abstracts
+# First page of contributions for a meeting
 get_event_contributions(event_id=1234567, instance="cern")
+
+# Continue with paging using `pagination.next_offset`
+get_event_contributions(event_id=1234567, limit=100, offset=0, instance="cern")
 
 # Full session/agenda structure of a conference
 get_event_sessions(event_id=9876543, instance="su")
@@ -135,8 +138,11 @@ search_events_by_keyword("dark matter", instance="cern")
 # Navigate the category hierarchy
 list_category_info(category_id=0, instance="su")
 
-# List all attachments for an event
+# First page of attachments for an event
 list_event_attachments(event_id=1234567, instance="cern")
+
+# Continue with paging using `pagination.next_offset`
+list_event_attachments(event_id=1234567, limit=100, offset=0, instance="cern")
 
 # List attachments for a specific contribution
 list_event_attachments(event_id=1234567, contribution_id=42, instance="cern")

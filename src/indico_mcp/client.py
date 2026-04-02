@@ -73,10 +73,15 @@ class IndicoClient:
         if resp.status_code == 404:
             raise IndicoError(f"Resource not found: {resource}", 404)
         if not resp.is_success or "text/html" in resp.headers.get("content-type", ""):
+            token_hint = (
+                " No token is configured for this instance, so authenticated export endpoints may return an HTML login page."
+                if "Authorization" not in self._http.headers
+                else ""
+            )
             raise IndicoError(
                 "Indico returned HTML instead of JSON. "
                 "Ensure the token has the 'Classic API' scope enabled "
-                f"(My Profile → Personal Tokens on {self._base_url}).",
+                f"(My Profile → Personal Tokens on {self._base_url}).{token_hint}",
                 resp.status_code,
             )
 

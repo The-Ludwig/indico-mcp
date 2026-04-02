@@ -117,6 +117,7 @@ deployment.
   finding a recurring talk slot): get_category_contributions — one API call instead
   of one call per event. Use this whenever you need to aggregate over a meeting series.
 - **Single event agenda:** get_event_details or get_event_sessions
+- For very large outputs, prefer small chunks using `limit` + `offset` where available.
 
 ## Downloading files
 
@@ -232,7 +233,7 @@ async def find_events_by_title(
         "order": "start",
     }
     try:
-        data = await client.export("categ/0", **params)
+        data = await client.export("categ/", **params)
     except IndicoError as e:
         raise ValueError(str(e)) from e
 
@@ -403,14 +404,19 @@ async def get_event_details(
 @app.tool()
 async def get_event_contributions(
     event_id: Annotated[int, Field(description="Indico event ID.")],
+    limit: Annotated[int, Field(description="Maximum contributions to return (default 200, max 1000). Use with offset for paging.")] = 200,
+    offset: Annotated[int, Field(description="Pagination offset for retrieving further results.")] = 0,
     include_attachments: Annotated[bool, Field(description="If true, include attachment metadata for each contribution.")] = False,
     instance: Annotated[str | None, _instance_field()] = None,
-) -> list[dict]:
+) -> dict:
     """
-    List all contributions for an event.
+    List contributions for an event.
 
     Each contribution includes: title, speakers, authors, start time, duration,
     session, track, abstract/description, and room.
+
+    Returns both `items` and pagination metadata so partial results are explicit.
+    Use `has_more` / `next_offset` to retrieve additional pages.
     """
     client = _client(instance)
     try:
@@ -423,10 +429,27 @@ async def get_event_contributions(
         raise ValueError(f"Event {event_id} not found or not accessible.")
 
     raw_contribs = results[0].get("contributions", [])
-    return [
+    start = max(offset, 0)
+    page_limit = min(limit, 1000)
+    end = start + page_limit
+    items = [
         normalize_contribution(c, include_attachments=include_attachments)
-        for c in raw_contribs
+        for c in raw_contribs[start:end]
     ]
+
+    total = len(raw_contribs)
+    has_more = end < total
+    return {
+        "items": items,
+        "pagination": {
+            "total": total,
+            "returned": len(items),
+            "limit": page_limit,
+            "offset": start,
+            "has_more": has_more,
+            "next_offset": end if has_more else None,
+        },
+    }
 
 
 @app.tool()
@@ -485,10 +508,10 @@ async def search_events_by_keyword(
         raw_events = events_block.get("results", [])
         if raw_events:
             return [normalize_event(e) for e in raw_events[:limit]]
-    except IndicoError as e:
-        if e.status_code != 404:
-            raise ValueError(str(e)) from e
-        # 404: modern search endpoint not available on this instance, fall through to legacy
+    except IndicoError:
+        # Some instances do not expose read endpoints under /api/ (often 404/405/403).
+        # Fall through to legacy export search for broad compatibility.
+        pass
 
     # Legacy: search via the export title-search endpoint
     try:
@@ -527,10 +550,10 @@ async def list_category_info(
                 for c in data.get("subcategories", [])
             ] or None,
         }.items() if v is not None}
-    except IndicoError as e:
-        if e.status_code != 404:
-            raise ValueError(str(e)) from e
-        # 404: REST categories endpoint not available on this instance, fall through to export
+    except IndicoError:
+        # API category reads are not consistently available across instances.
+        # Fall through to export for compatibility.
+        pass
 
     # Fallback: infer from a minimal export call
     try:
@@ -552,8 +575,10 @@ async def list_category_info(
 async def list_event_attachments(
     event_id: Annotated[int, Field(description="Indico event ID.")],
     contribution_id: Annotated[int | None, Field(description="If set, only list attachments for this contribution.")] = None,
+    limit: Annotated[int, Field(description="Maximum attachments to return (default 200, max 1000). Use with offset for paging.")] = 200,
+    offset: Annotated[int, Field(description="Pagination offset for retrieving further results.")] = 0,
     instance: Annotated[str | None, _instance_field()] = None,
-) -> list[dict]:
+) -> dict:
     """
     List all file attachments and links for an event (or a specific contribution).
 
@@ -562,6 +587,9 @@ async def list_event_attachments(
 
     Use this to discover what files (slides, papers, minutes, etc.) are attached to
     an event or contribution before downloading them with download_attachment.
+
+    Returns both `items` and pagination metadata so partial results are explicit.
+    Use `has_more` / `next_offset` to retrieve additional pages.
     """
     client = _client(instance)
     try:
@@ -601,12 +629,31 @@ async def list_event_attachments(
             sub_ctx = {**ctx, "subcontribution_id": subcontrib.get("id"), "subcontribution_title": subcontrib.get("title")}
             _collect(subcontrib, sub_ctx)
 
-    if not attachments:
-        return [{"note": "No attachments found for this event." + (
-            f" (filtered to contribution {contribution_id})" if contribution_id else ""
-        )}]
+    start = max(offset, 0)
+    page_limit = min(limit, 1000)
+    end = start + page_limit
+    items = attachments[start:end]
+    total = len(attachments)
+    has_more = end < total
 
-    return attachments
+    note: str | None = None
+    if total == 0:
+        note = "No attachments found for this event." + (
+            f" (filtered to contribution {contribution_id})" if contribution_id else ""
+        )
+
+    return {
+        "items": items,
+        "pagination": {
+            "total": total,
+            "returned": len(items),
+            "limit": page_limit,
+            "offset": start,
+            "has_more": has_more,
+            "next_offset": end if has_more else None,
+        },
+        "note": note,
+    }
 
 
 @app.tool()
