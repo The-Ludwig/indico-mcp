@@ -105,6 +105,42 @@ def normalize_event_header(raw: dict) -> dict:
     }.items() if v is not None}
 
 
+def normalize_attachment(raw: dict) -> dict:
+    """Flatten an attachment from the export API folders structure."""
+    attachment: dict = {
+        "id": raw.get("id"),
+        "title": raw.get("title"),
+        "type": raw.get("type"),  # "file" or "link"
+        "download_url": raw.get("download_url"),
+        "description": raw.get("description") or None,
+        "modified": raw.get("modified_dt"),
+        "is_protected": raw.get("is_protected") or None,
+    }
+    # File-specific fields
+    if raw.get("type") == "file":
+        attachment["filename"] = raw.get("filename")
+        attachment["content_type"] = raw.get("content_type")
+        attachment["size"] = raw.get("size")
+    # Link-specific fields
+    if raw.get("type") == "link":
+        attachment["link_url"] = raw.get("link_url")
+    return {k: v for k, v in attachment.items() if v is not None}
+
+
+def normalize_folder(raw: dict) -> dict:
+    """Flatten an attachment folder from the export API."""
+    attachments = [normalize_attachment(a) for a in raw.get("attachments", [])]
+    folder: dict = {
+        "id": raw.get("id"),
+        "title": raw.get("title"),
+        "description": raw.get("description") or None,
+        "is_default": raw.get("default_folder"),
+        "is_protected": raw.get("is_protected") or None,
+        "attachments": attachments or None,
+    }
+    return {k: v for k, v in folder.items() if v is not None}
+
+
 def extract_results(response: dict) -> list[dict]:
     """Pull the results list out of the standard export API envelope."""
     results = response.get("results", [])

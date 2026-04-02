@@ -13,6 +13,8 @@ Tools:
   get_event_sessions         — sessions with nested contributions (full agenda)
   search_events_by_keyword   — full-text search via Indico search API
   list_category_info         — metadata about a category, with subcategory names
+  list_event_attachments     — list file attachments for an event or contribution
+  download_attachment        — download an attachment file to disk
 
 Configuration (see .env.example):
   INDICO_BASE_URL / INDICO_TOKEN            — single instance
@@ -22,8 +24,10 @@ Configuration (see .env.example):
 from __future__ import annotations
 
 import os
+import tempfile
 import urllib.parse
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
@@ -34,6 +38,7 @@ from .client import IndicoClient, IndicoError
 from .config import Config
 from .models import (
     extract_results,
+    normalize_attachment,
     normalize_contribution,
     normalize_event,
     normalize_session,
@@ -103,6 +108,13 @@ institute's own instance.
   finding a recurring talk slot): get_category_contributions — one API call instead
   of one call per event. Use this whenever you need to aggregate over a meeting series.
 - **Single event agenda:** get_event_details or get_event_sessions
+
+## Downloading files
+
+- **List attachments:** list_event_attachments — shows all files (slides, papers, minutes)
+  attached to an event or contribution, with download URLs and metadata.
+- **Download a file:** download_attachment — downloads a file given its download_url
+  (from list_event_attachments) and saves it locally.
 """,
     lifespan=lifespan,
 )
@@ -493,6 +505,117 @@ async def list_category_info(
             "Full category metadata not available on this instance. "
             "Use search_category_events to list events."
         ),
+    }
+
+
+@app.tool()
+async def list_event_attachments(
+    event_id: Annotated[int, Field(description="Indico event ID.")],
+    contribution_id: Annotated[int | None, Field(description="If set, only list attachments for this contribution.")] = None,
+    instance: Annotated[str | None, _instance_field()] = None,
+) -> list[dict]:
+    """
+    List all file attachments and links for an event (or a specific contribution).
+
+    Returns a flat list of attachments, each with: id, title, filename, content_type,
+    size, download_url, and the folder/contribution/event context it belongs to.
+
+    Use this to discover what files (slides, papers, minutes, etc.) are attached to
+    an event or contribution before downloading them with download_attachment.
+    """
+    client = _client(instance)
+    try:
+        data = await client.export(f"event/{event_id}", detail="contributions")
+    except IndicoError as e:
+        raise ValueError(str(e)) from e
+
+    results = extract_results(data)
+    if not results:
+        raise ValueError(f"Event {event_id} not found or not accessible.")
+
+    event = results[0]
+    attachments: list[dict] = []
+
+    def _collect(obj: dict, context: dict) -> None:
+        for folder in obj.get("folders", []):
+            folder_title = folder.get("title", "")
+            for att in folder.get("attachments", []):
+                entry = normalize_attachment(att)
+                entry["folder"] = folder_title
+                entry.update(context)
+                attachments.append(entry)
+
+    # Event-level attachments
+    _collect(event, {"event_id": event_id})
+
+    # Contribution-level attachments
+    for contrib in event.get("contributions", []):
+        cid = contrib.get("id")
+        if contribution_id is not None and cid != contribution_id:
+            continue
+        ctx = {"event_id": event_id, "contribution_id": cid, "contribution_title": contrib.get("title")}
+        _collect(contrib, ctx)
+
+        # Subcontribution-level attachments
+        for subcontrib in contrib.get("subContributions", []):
+            sub_ctx = {**ctx, "subcontribution_id": subcontrib.get("id"), "subcontribution_title": subcontrib.get("title")}
+            _collect(subcontrib, sub_ctx)
+
+    if not attachments:
+        return [{"note": "No attachments found for this event." + (
+            f" (filtered to contribution {contribution_id})" if contribution_id else ""
+        )}]
+
+    return attachments
+
+
+@app.tool()
+async def download_attachment(
+    download_url: Annotated[str, Field(description="The download_url from list_event_attachments output.")],
+    save_to: Annotated[str | None, Field(
+        description="Local file path to save the file to. If not provided, saves to a temp directory."
+    )] = None,
+    instance: Annotated[str | None, _instance_field()] = None,
+) -> dict:
+    """
+    Download a file attachment from Indico and save it locally.
+
+    Use list_event_attachments first to get the download_url for the file you want.
+    Returns the local file path, filename, content type, and size.
+
+    Files are saved to a temporary directory by default, or to a specified path.
+    Maximum file size: 100 MB.
+    """
+    client = _client(instance)
+    try:
+        result = await client.download(download_url)
+    except IndicoError as e:
+        raise ValueError(str(e)) from e
+
+    if save_to:
+        dest = Path(save_to)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        tmp_dir = Path(tempfile.gettempdir()) / "indico-mcp-downloads"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        dest = tmp_dir / result.filename
+
+    # Avoid overwriting: append a suffix if needed
+    if dest.exists():
+        stem = dest.stem
+        suffix = dest.suffix
+        counter = 1
+        while dest.exists():
+            dest = dest.with_name(f"{stem}_{counter}{suffix}")
+            counter += 1
+
+    dest.write_bytes(result.content)
+
+    return {
+        "path": str(dest),
+        "filename": result.filename,
+        "content_type": result.content_type,
+        "size": result.size,
     }
 
 
