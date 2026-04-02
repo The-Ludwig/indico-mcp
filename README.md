@@ -77,7 +77,7 @@ INDICO_SU_TOKEN=indp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ## Connecting to Claude
 
-Add to your Claude config (`~/.claude.json` or Claude Desktop settings):
+Run `claude add indico -- uv run --directory /path/to/indico-mcp indico-mcp` or manually add to your Claude config (`~/.claude.json` or Claude Desktop settings):
 
 ```json
 {
