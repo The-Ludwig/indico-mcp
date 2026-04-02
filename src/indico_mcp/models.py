@@ -105,9 +105,40 @@ def normalize_event_header(raw: dict) -> dict:
     }.items() if v is not None}
 
 
+def normalize_room(raw: dict) -> dict:
+    """Flatten a room dict from /export/roomName/."""
+    room: dict = {
+        "id": raw.get("id"),
+        "name": raw.get("name"),
+        "full_name": raw.get("fullName"),
+        "building": raw.get("building"),
+        "floor": raw.get("floor"),
+        "location": raw.get("location"),
+        "url": raw.get("url"),
+    }
+    return {k: v for k, v in room.items() if v is not None}
+
+
+def normalize_reservation(raw: dict) -> dict:
+    """Flatten a reservation dict from /export/reservation/."""
+    room = raw.get("room", {})
+    reservation: dict = {
+        "id": raw.get("id"),
+        "room_id": room.get("id") if isinstance(room, dict) else None,
+        "room_name": room.get("fullName") if isinstance(room, dict) else None,
+        "start": _date_str(raw.get("startDT")),
+        "end": _date_str(raw.get("endDT")),
+        "booked_for": raw.get("bookedForName"),
+        "reason": raw.get("reason"),
+        "is_confirmed": raw.get("isConfirmed"),
+    }
+    return {k: v for k, v in reservation.items() if v is not None}
+
+
 def extract_results(response: dict) -> list[dict]:
     """Pull the results list out of the standard export API envelope."""
-    results = response.get("results", [])
+    # Some Indico instances use "result" (singular) instead of "results"
+    results = response.get("results") or response.get("result", [])
     # Some endpoints wrap in another list
     if results and isinstance(results[0], list):
         results = results[0]
