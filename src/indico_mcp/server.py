@@ -1,13 +1,15 @@
 """
-Indico MCP Server — Phase 1
+Indico MCP Server
 
 Tools:
+  search_categories        — find categories by name (returns ID + breadcrumb path)
   search_category_events   — list events in a category, filtered by date/keyword
+  get_category_contributions — all contributions across events in a category (single call)
   get_event_details        — full event metadata + contributions
   get_event_contributions  — flat list of contributions for an event
   get_event_sessions       — sessions with nested contributions (full agenda)
   search_events_by_keyword — full-text search via Indico search API
-  list_category_info       — metadata about a category
+  list_category_info       — metadata about a category, with subcategory names
 
 Configuration (see .env.example):
   INDICO_BASE_URL / INDICO_TOKEN            — single instance
@@ -17,11 +19,12 @@ Configuration (see .env.example):
 from __future__ import annotations
 
 import os
+import urllib.parse
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
-from fastmcp import Context, FastMCP
+from fastmcp import FastMCP
 from pydantic import Field
 
 from .client import IndicoClient, IndicoError
@@ -31,6 +34,7 @@ from .models import (
     normalize_contribution,
     normalize_event,
     normalize_session,
+    normalize_event_header,
 )
 
 load_dotenv()
@@ -72,7 +76,8 @@ app = FastMCP(
 # ---------------------------------------------------------------------------
 
 def _client(instance: str | None) -> IndicoClient:
-    assert _config is not None, "Server not initialised"
+    if _config is None:
+        raise RuntimeError("Indico MCP server is not initialised — lifespan did not run")
     cfg = _config.get(instance)
     return _clients[cfg.name]
 
@@ -93,6 +98,86 @@ def _instance_field() -> Any:
 
 
 @app.tool()
+async def search_categories(
+    query: Annotated[str, Field(description="Name or partial name of the category to search for.")],
+    instance: Annotated[str | None, _instance_field()] = None,
+) -> list[dict]:
+    """
+    Search for Indico categories by name.
+
+    Returns matching categories with their ID, title, full breadcrumb path from the root,
+    and event/subcategory counts. Use this to discover the category_id needed by other tools
+    when you don't already know it (e.g. 'OKC Colloquia', 'HGTD Speakers Committee').
+
+    Returns up to 10 results. Refine the query if too many or too few results appear.
+    """
+    client = _client(instance)
+    try:
+        data = await client.get("category/search", q=query)
+    except IndicoError as e:
+        raise ValueError(str(e)) from e
+
+    return [
+        {k: v for k, v in {
+            "id": c.get("id"),
+            "title": c.get("title"),
+            "path": " > ".join(p["title"] for p in c.get("path", [])),
+            "has_events": c.get("has_events"),
+            "has_children": c.get("has_children"),
+            "event_count": c.get("deep_event_count"),
+            "is_protected": c.get("is_protected"),
+        }.items() if v is not None}
+        for c in data.get("categories", [])
+    ]
+
+
+@app.tool()
+async def get_category_contributions(
+    category_id: Annotated[int, Field(description="Indico category ID.")],
+    from_date: Annotated[str | None, Field(description="Start date filter, YYYY-MM-DD.")] = None,
+    to_date: Annotated[str | None, Field(description="End date filter, YYYY-MM-DD.")] = None,
+    limit: Annotated[int, Field(description="Maximum contributions to return (default 200, max 500).")] = 200,
+    offset: Annotated[int, Field(description="Pagination offset for retrieving further results.")] = 0,
+    instance: Annotated[str | None, _instance_field()] = None,
+) -> list[dict]:
+    """
+    Get contributions from ALL events in a category within an optional date range, in a single API call.
+
+    Returns a flat list of contributions, each annotated with event_id, event_title, and event_start
+    so you know which event each contribution belongs to.
+
+    This is far more efficient than listing events and calling get_event_contributions for each one.
+    Use it for: finding all talks by a speaker across a series of meetings, analysing themes across
+    colloquia, counting talks matching a title pattern, or any aggregation over multiple events.
+
+    The API caps results at 500 contributions per request. Use offset to paginate if needed.
+    """
+    client = _client(instance)
+    params: dict[str, Any] = {
+        "from": from_date,
+        "to": to_date,
+        "limit": min(limit, 500),
+        "offset": offset,
+        "order": "start",
+    }
+    try:
+        data = await client.export(f"categ/{category_id}", detail="contributions", **params)
+    except IndicoError as e:
+        raise ValueError(str(e)) from e
+
+    results = extract_results(data)
+    contributions = []
+    for event in results:
+        event_ctx = normalize_event_header(event)
+        for raw_contrib in event.get("contributions", []):
+            contrib = normalize_contribution(raw_contrib)
+            contrib.update(event_ctx)
+            contributions.append(contrib)
+
+    return contributions
+
+
+@app.tool()
 async def search_category_events(
     category_id: Annotated[int, Field(description="Indico category ID. Use 0 for the root (all public events).")] = 0,
     from_date: Annotated[str | None, Field(description="Start date filter, YYYY-MM-DD.")] = None,
@@ -100,7 +185,6 @@ async def search_category_events(
     keyword: Annotated[str | None, Field(description="Filter event titles by this keyword (case-insensitive).")] = None,
     limit: Annotated[int, Field(description="Maximum number of events to return (default 50, max 1000).")] = 50,
     instance: Annotated[str | None, _instance_field()] = None,
-    ctx: Context = None,
 ) -> list[dict]:
     """
     List events in an Indico category, optionally filtered by date range and keyword.
@@ -134,7 +218,6 @@ async def search_category_events(
 async def get_event_details(
     event_id: Annotated[int, Field(description="Indico event ID.")],
     instance: Annotated[str | None, _instance_field()] = None,
-    ctx: Context = None,
 ) -> dict:
     """
     Get full metadata for an event, including its list of contributions.
@@ -159,7 +242,6 @@ async def get_event_details(
 async def get_event_contributions(
     event_id: Annotated[int, Field(description="Indico event ID.")],
     instance: Annotated[str | None, _instance_field()] = None,
-    ctx: Context = None,
 ) -> list[dict]:
     """
     List all contributions for an event.
@@ -185,7 +267,6 @@ async def get_event_contributions(
 async def get_event_sessions(
     event_id: Annotated[int, Field(description="Indico event ID.")],
     instance: Annotated[str | None, _instance_field()] = None,
-    ctx: Context = None,
 ) -> list[dict]:
     """
     Get the session structure for an event, with each session's contributions nested inside.
@@ -212,7 +293,6 @@ async def search_events_by_keyword(
     keyword: Annotated[str, Field(description="Search term.")],
     limit: Annotated[int, Field(description="Maximum results to return (default 20).")] = 20,
     instance: Annotated[str | None, _instance_field()] = None,
-    ctx: Context = None,
 ) -> list[dict]:
     """
     Full-text search for events matching a keyword.
@@ -235,12 +315,13 @@ async def search_events_by_keyword(
         raw_events = events_block.get("results", [])
         if raw_events:
             return [normalize_event(e) for e in raw_events[:limit]]
-    except IndicoError:
-        pass  # fall through to legacy
+    except IndicoError as e:
+        if e.status_code != 404:
+            raise ValueError(str(e)) from e
+        # 404: modern search endpoint not available on this instance, fall through to legacy
 
     # Legacy: search via the export title-search endpoint
     try:
-        import urllib.parse
         encoded = urllib.parse.quote(keyword, safe="")
         data = await client.export(f"event/search/{encoded}", limit=limit)
         results = extract_results(data)
@@ -253,7 +334,6 @@ async def search_events_by_keyword(
 async def list_category_info(
     category_id: Annotated[int, Field(description="Indico category ID. Use 0 for the root.")] = 0,
     instance: Annotated[str | None, _instance_field()] = None,
-    ctx: Context = None,
 ) -> dict:
     """
     Get metadata about an Indico category: name, description, and subcategory IDs.
@@ -266,16 +346,21 @@ async def list_category_info(
     # Try the REST API first (returns richer category data)
     try:
         data = await client.api(f"categories/{category_id}/")
-        return {
+        return {k: v for k, v in {
             "id": data.get("id"),
             "title": data.get("title"),
             "description": data.get("description") or None,
             "url": data.get("url"),
             "parent_id": data.get("parent_id"),
-            "subcategory_ids": [c.get("id") for c in data.get("subcategories", [])],
-        }
-    except IndicoError:
-        pass
+            "subcategories": [
+                {"id": c.get("id"), "title": c.get("title")}
+                for c in data.get("subcategories", [])
+            ] or None,
+        }.items() if v is not None}
+    except IndicoError as e:
+        if e.status_code != 404:
+            raise ValueError(str(e)) from e
+        # 404: REST categories endpoint not available on this instance, fall through to export
 
     # Fallback: infer from a minimal export call
     try:

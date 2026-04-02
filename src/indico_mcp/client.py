@@ -94,3 +94,30 @@ class IndicoClient:
             )
 
         return resp.json()
+
+    async def get(self, path: str, **params: object) -> dict:
+        """
+        GET {base_url}/{path}  (arbitrary path, no prefix added)
+
+        Used for internal Indico web endpoints such as /category/search that are
+        not under /api/ or /export/.
+        """
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        url = f"{self._base_url}/{path.lstrip('/')}"
+        try:
+            resp = await self._http.get(url, params=clean_params)
+        except httpx.RequestError as exc:
+            raise IndicoError(f"Network error reaching {self._base_url}: {exc}") from exc
+
+        if resp.status_code == 401:
+            raise IndicoError("Authentication failed. Check INDICO_TOKEN.", 401)
+        if resp.status_code == 403:
+            raise IndicoError("Access denied.", 403)
+        if resp.status_code == 404:
+            raise IndicoError(f"Endpoint not found: {path}", 404)
+        if not resp.is_success or "text/html" in resp.headers.get("content-type", ""):
+            raise IndicoError(
+                f"Indico returned HTTP {resp.status_code} for {url}", resp.status_code
+            )
+
+        return resp.json()

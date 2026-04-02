@@ -96,6 +96,15 @@ def normalize_session(raw: dict) -> dict:
     return {k: v for k, v in session.items() if v is not None}
 
 
+def normalize_event_header(raw: dict) -> dict:
+    """Minimal event context (id, title, start) used to annotate category-level contributions."""
+    return {k: v for k, v in {
+        "event_id": raw.get("id"),
+        "event_title": raw.get("title"),
+        "event_start": _date_str(raw.get("startDate")),
+    }.items() if v is not None}
+
+
 def extract_results(response: dict) -> list[dict]:
     """Pull the results list out of the standard export API envelope."""
     results = response.get("results", [])
