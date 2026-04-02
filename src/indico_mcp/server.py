@@ -2,14 +2,16 @@
 Indico MCP Server
 
 Tools:
-  search_categories        — find categories by name (returns ID + breadcrumb path)
-  search_category_events   — list events in a category, filtered by date/keyword
+  search_categories          — find categories by name (returns ID + breadcrumb path)
+  find_events_by_title       — search event titles across the whole instance; reveals category IDs
+  browse_category            — list direct subcategories of a category by ID
+  search_category_events     — list events in a category, filtered by date/keyword
   get_category_contributions — all contributions across events in a category (single call)
-  get_event_details        — full event metadata + contributions
-  get_event_contributions  — flat list of contributions for an event
-  get_event_sessions       — sessions with nested contributions (full agenda)
-  search_events_by_keyword — full-text search via Indico search API
-  list_category_info       — metadata about a category, with subcategory names
+  get_event_details          — full event metadata + contributions
+  get_event_contributions    — flat list of contributions for an event
+  get_event_sessions         — sessions with nested contributions (full agenda)
+  search_events_by_keyword   — full-text search via Indico search API
+  list_category_info         — metadata about a category, with subcategory names
 
 Configuration (see .env.example):
   INDICO_BASE_URL / INDICO_TOKEN            — single instance
@@ -62,11 +64,45 @@ async def lifespan(server: FastMCP):  # noqa: ARG001
 
 app = FastMCP(
     "indico",
-    instructions=(
-        "Tools for browsing Indico meeting agendas, searching events by category, "
-        "and extracting contribution and session details. "
-        "Use the `instance` parameter to select between configured Indico servers."
-    ),
+    instructions="""
+Tools for browsing Indico meeting agendas, searching events, and extracting
+contribution and session details across one or more configured Indico instances.
+Use the `instance` parameter to select between them.
+
+## Finding the right category_id
+
+Most tools require a category_id. Use this decision tree when you don't know it:
+
+1. **search_categories** — try first with a keyword from the category name
+   (e.g. "colloquia", "HGTD", "Stockholm"). Returns up to 10 matches with full
+   breadcrumb paths, so you can confirm you have the right one.
+
+2. **find_events_by_title** — if search_categories fails or returns nothing useful,
+   search by a known fragment of the *event* title instead
+   (e.g. "AlbaNova ATLAS meeting", "HGTD Speakers Committee meeting").
+   Every result includes `category_id` and `category` — this immediately tells you
+   which category the events live in, even when the category name is something
+   unexpected like "Stockholm" or "HGTD Miscellaneous".
+
+3. **browse_category** — if you have a parent category ID but need to find the right
+   subcategory, call this to see all subcategories with event counts. Drill down
+   level by level. Start at 0 for the root if completely lost.
+
+## Which instance to search
+
+If a meeting is part of a large international experiment (ATLAS, CMS, LHCb, etc.),
+it is almost always on the CERN instance even if the group is based elsewhere
+(Stockholm, Paris, Tokyo). Local seminars and colloquia are typically on the
+institute's own instance.
+
+## Retrieving data efficiently
+
+- **Listing events in a known category:** search_category_events
+- **Contributions across many events at once** (speaker counts, theme analysis,
+  finding a recurring talk slot): get_category_contributions — one API call instead
+  of one call per event. Use this whenever you need to aggregate over a meeting series.
+- **Single event agenda:** get_event_details or get_event_sessions
+""",
     lifespan=lifespan,
 )
 
@@ -132,6 +168,82 @@ async def search_categories(
 
 
 @app.tool()
+async def find_events_by_title(
+    title: Annotated[str, Field(description="Event title or partial title to search for.")],
+    from_date: Annotated[str | None, Field(description="Start date filter, YYYY-MM-DD.")] = None,
+    to_date: Annotated[str | None, Field(description="End date filter, YYYY-MM-DD.")] = None,
+    limit: Annotated[int, Field(description="Maximum results to return (default 10).")] = 10,
+    instance: Annotated[str | None, _instance_field()] = None,
+) -> list[dict]:
+    """
+    Search for events by title across the entire Indico instance.
+
+    Each result includes category_id and category name, making this the most direct
+    way to discover which category a meeting series belongs to when you know part of
+    the event title but not the category ID.
+
+    Example: searching 'AlbaNova ATLAS meeting' returns events whose category field
+    reads 'Stockholm' with category_id=1384, immediately revealing where those
+    meetings live so you can pass that ID to other tools.
+    """
+    client = _client(instance)
+    params: dict[str, Any] = {
+        "q": title,
+        "from": from_date,
+        "to": to_date,
+        "limit": min(limit, 100),
+        "order": "start",
+    }
+    try:
+        data = await client.export("categ/0", **params)
+    except IndicoError as e:
+        raise ValueError(str(e)) from e
+
+    results = extract_results(data)
+    return [normalize_event(r) for r in results[:limit]]
+
+
+@app.tool()
+async def browse_category(
+    category_id: Annotated[int, Field(description="Indico category ID. Use 0 for the root.")] = 0,
+    instance: Annotated[str | None, _instance_field()] = None,
+) -> list[dict]:
+    """
+    List the direct subcategories of an Indico category, with event counts.
+
+    Works by fetching a batch of recent events from the category and collecting the
+    distinct (category_id, category_title) pairs from their metadata. This is the
+    reliable fallback when the REST API is not available on an instance.
+
+    Use this to navigate the category hierarchy: start at the root (0), pick a
+    subcategory, call browse_category again on that ID, and so on until you find
+    the right leaf category to pass to search_category_events or get_category_contributions.
+
+    Note: subcategories with no events in the sampled batch may not appear.
+    """
+    client = _client(instance)
+    try:
+        data = await client.export(f"categ/{category_id}", limit=500, order="start")
+    except IndicoError as e:
+        raise ValueError(str(e)) from e
+
+    results = extract_results(data)
+
+    seen: dict[int, dict] = {}
+    for event in results:
+        cid = event.get("categoryId")
+        ctitle = event.get("category")
+        if cid is None:
+            continue
+        if cid not in seen:
+            seen[cid] = {"id": cid, "title": ctitle, "sampled_event_count": 0}
+        seen[cid]["sampled_event_count"] += 1
+
+    # Sort by most events first so the busiest subcategories appear at the top
+    return sorted(seen.values(), key=lambda x: -x["sampled_event_count"])
+
+
+@app.tool()
 async def get_category_contributions(
     category_id: Annotated[int, Field(description="Indico category ID.")],
     from_date: Annotated[str | None, Field(description="Start date filter, YYYY-MM-DD.")] = None,
@@ -166,6 +278,8 @@ async def get_category_contributions(
         raise ValueError(str(e)) from e
 
     results = extract_results(data)
+    total_count = data.get("count", 0)
+
     contributions = []
     for event in results:
         event_ctx = normalize_event_header(event)
@@ -173,6 +287,14 @@ async def get_category_contributions(
             contrib = normalize_contribution(raw_contrib)
             contrib.update(event_ctx)
             contributions.append(contrib)
+
+    if not contributions and total_count > 0:
+        raise ValueError(
+            f"Category {category_id} has {total_count} events but no contributions were "
+            "returned. The token most likely lacks the 'Classic API' (legacy_api) scope "
+            "required for detail=contributions. Enable it under My Profile → Personal "
+            "Tokens on the Indico instance."
+        )
 
     return contributions
 
@@ -196,6 +318,7 @@ async def search_category_events(
     params: dict[str, Any] = {
         "from": from_date,
         "to": to_date,
+        "q": keyword,  # server-side title filter; applied before limit
         "limit": min(limit, 1000),
         "order": "start",
     }
@@ -205,13 +328,7 @@ async def search_category_events(
         raise ValueError(str(e)) from e
 
     results = extract_results(data)
-    events = [normalize_event(r) for r in results]
-
-    if keyword:
-        kw = keyword.lower()
-        events = [e for e in events if kw in (e.get("title") or "").lower()]
-
-    return events
+    return [normalize_event(r) for r in results]
 
 
 @app.tool()
