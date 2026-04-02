@@ -18,6 +18,8 @@ Works with any Indico instance — configure multiple instances simultaneously a
 | `get_event_sessions` | Session structure with nested contributions (full agenda view) |
 | `search_events_by_keyword` | Full-text search across events |
 | `list_category_info` | Category name, description, and direct subcategories with names |
+| `list_event_attachments` | List all file attachments (slides, papers, minutes) for an event or contribution |
+| `download_attachment` | Download an attachment file to disk given its download URL |
 
 All tools accept an optional `instance` parameter to select which Indico server to query.
 
@@ -131,11 +133,22 @@ search_events_by_keyword("dark matter", instance="cern")
 
 # Navigate the category hierarchy
 list_category_info(category_id=0, instance="su")
+
+# List all attachments for an event
+list_event_attachments(event_id=1234567, instance="cern")
+
+# List attachments for a specific contribution
+list_event_attachments(event_id=1234567, contribution_id=42, instance="cern")
+
+# Download a file (URL from list_event_attachments output)
+download_attachment(download_url="https://indico.cern.ch/event/.../file.pdf")
 ```
 
 ## How it works
 
 The server uses the [Indico HTTP Export API](https://docs.getindico.io/en/stable/http-api/) (`/export/`) with `detail=contributions` and `detail=sessions` query parameters to retrieve structured agenda data. Authentication uses a standard `Authorization: Bearer <token>` header. The `/api/` endpoints in Indico are write-only (POST); all read operations go through `/export/`.
+
+File attachments are discovered via the `folders` structure included in the export API response, which provides direct download URLs, filenames, content types, and sizes. Downloads are authenticated with the same Bearer token and saved locally (to a temp directory by default, or a specified path). Maximum file size is 100 MB.
 
 ## Contributing
 
