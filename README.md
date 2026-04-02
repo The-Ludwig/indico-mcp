@@ -8,6 +8,7 @@ Works with any Indico instance — configure multiple instances simultaneously a
 
 | Tool | Description |
 |------|-------------|
+| `list_instances` | List configured instance names and the current default instance |
 | `search_categories` | Find categories by name; returns ID, breadcrumb path, and event count |
 | `find_events_by_title` | Search event titles across the whole instance; each result includes `category_id` — useful for discovering which category a meeting series belongs to |
 | `browse_category` | List direct subcategories of a category by ID; works without the REST API |

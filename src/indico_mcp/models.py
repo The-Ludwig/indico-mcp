@@ -32,7 +32,11 @@ def _person_name(p: dict) -> str:
     return name or p.get("name", "")
 
 
-def normalize_event(raw: dict, include_contributions: bool = False) -> dict:
+def normalize_event(
+    raw: dict,
+    include_contributions: bool = False,
+    include_contribution_attachments: bool = False,
+) -> dict:
     """Flatten a raw event dict from the export API."""
     event: dict = {
         "id": raw.get("id"),
@@ -50,15 +54,26 @@ def normalize_event(raw: dict, include_contributions: bool = False) -> dict:
     }
     if include_contributions and "contributions" in raw:
         event["contributions"] = [
-            normalize_contribution(c) for c in raw["contributions"]
+            normalize_contribution(
+                c, include_attachments=include_contribution_attachments
+            )
+            for c in raw["contributions"]
         ]
     return {k: v for k, v in event.items() if v is not None}
 
 
-def normalize_contribution(raw: dict) -> dict:
+def normalize_contribution(raw: dict, include_attachments: bool = False) -> dict:
     """Flatten a contribution from the export API."""
     speakers = [_person_name(p) for p in raw.get("speakers", [])]
     authors = [_person_name(p) for p in raw.get("primaryauthors", [])]
+    attachments: list[dict] = []
+    if include_attachments:
+        for folder in raw.get("folders", []):
+            folder_title = folder.get("title", "")
+            for attachment in folder.get("attachments", []):
+                att = normalize_attachment(attachment)
+                att["folder"] = folder_title
+                attachments.append(att)
 
     contrib: dict = {
         "id": raw.get("id"),
@@ -74,14 +89,18 @@ def normalize_contribution(raw: dict) -> dict:
         "authors": authors or None,
         "abstract": raw.get("description") or None,
         "keywords": raw.get("keywords") or None,
+        "attachments": attachments or None,
     }
     return {k: v for k, v in contrib.items() if v is not None}
 
 
-def normalize_session(raw: dict) -> dict:
+def normalize_session(raw: dict, include_attachments: bool = False) -> dict:
     """Flatten a session from the export API."""
     conveners = [_person_name(p) for p in raw.get("conveners", [])]
-    contributions = [normalize_contribution(c) for c in raw.get("contributions", [])]
+    contributions = [
+        normalize_contribution(c, include_attachments=include_attachments)
+        for c in raw.get("contributions", [])
+    ]
 
     session: dict = {
         "id": raw.get("id"),

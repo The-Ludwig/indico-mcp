@@ -75,6 +75,11 @@ Tools for browsing Indico meeting agendas, searching events, and extracting
 contribution and session details across one or more configured Indico instances.
 Use the `instance` parameter to select between them.
 
+Important:
+- Never assume an instance name like "cern" or "su" exists.
+- Only use instance names explicitly configured for this server.
+- If unsure, omit `instance` to use the configured default.
+
 ## Finding the right category_id
 
 Most tools require a category_id. Use this decision tree when you don't know it:
@@ -97,9 +102,13 @@ Most tools require a category_id. Use this decision tree when you don't know it:
 ## Which instance to search
 
 If a meeting is part of a large international experiment (ATLAS, CMS, LHCb, etc.),
-it is almost always on the CERN instance even if the group is based elsewhere
-(Stockholm, Paris, Tokyo). Local seminars and colloquia are typically on the
-institute's own instance.
+it is almost always on the experiments instance 
+(e.g. CERN for the LHC experiment ATLAS, CMS, LHCb and IceCube for IceCube)
+even if the group is based elsewhere (Stockholm, Paris, Tokyo). 
+Local seminars and colloquia are typically on the institute's own instance.
+
+When selecting an instance, first verify the name is configured in this MCP
+deployment.
 
 ## Retrieving data efficiently
 
@@ -135,8 +144,8 @@ def _instance_field() -> Any:
     return Field(
         default=None,
         description=(
-            "Named Indico instance to query (e.g. 'cern', 'su'). "
-            "Defaults to the primary configured instance."
+            "Named Indico instance to query. Use only configured names. "
+            "If omitted, the server default instance is used."
         ),
     )
 
@@ -144,6 +153,21 @@ def _instance_field() -> Any:
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+
+
+@app.tool()
+async def list_instances() -> dict:
+    """
+    List configured Indico instances and the default instance name.
+
+    Use this first if you are unsure which `instance` values are valid.
+    """
+    if _config is None:
+        raise RuntimeError("Indico MCP server is not initialised — lifespan did not run")
+    return {
+        "default": _config.default_name,
+        "instances": _config.instance_names,
+    }
 
 
 @app.tool()
@@ -263,6 +287,7 @@ async def get_category_contributions(
     to_date: Annotated[str | None, Field(description="End date filter, YYYY-MM-DD.")] = None,
     limit: Annotated[int, Field(description="Maximum contributions to return (default 200, max 500).")] = 200,
     offset: Annotated[int, Field(description="Pagination offset for retrieving further results.")] = 0,
+    include_attachments: Annotated[bool, Field(description="If true, include contribution attachment metadata in each result.")] = False,
     instance: Annotated[str | None, _instance_field()] = None,
 ) -> list[dict]:
     """
@@ -297,7 +322,9 @@ async def get_category_contributions(
     for event in results:
         event_ctx = normalize_event_header(event)
         for raw_contrib in event.get("contributions", []):
-            contrib = normalize_contribution(raw_contrib)
+            contrib = normalize_contribution(
+                raw_contrib, include_attachments=include_attachments
+            )
             contrib.update(event_ctx)
             contributions.append(contrib)
 
@@ -347,6 +374,7 @@ async def search_category_events(
 @app.tool()
 async def get_event_details(
     event_id: Annotated[int, Field(description="Indico event ID.")],
+    include_attachments: Annotated[bool, Field(description="If true, include contribution attachment metadata in the event output.")] = False,
     instance: Annotated[str | None, _instance_field()] = None,
 ) -> dict:
     """
@@ -365,12 +393,17 @@ async def get_event_details(
     if not results:
         raise ValueError(f"Event {event_id} not found or not accessible.")
 
-    return normalize_event(results[0], include_contributions=True)
+    return normalize_event(
+        results[0],
+        include_contributions=True,
+        include_contribution_attachments=include_attachments,
+    )
 
 
 @app.tool()
 async def get_event_contributions(
     event_id: Annotated[int, Field(description="Indico event ID.")],
+    include_attachments: Annotated[bool, Field(description="If true, include attachment metadata for each contribution.")] = False,
     instance: Annotated[str | None, _instance_field()] = None,
 ) -> list[dict]:
     """
@@ -390,12 +423,16 @@ async def get_event_contributions(
         raise ValueError(f"Event {event_id} not found or not accessible.")
 
     raw_contribs = results[0].get("contributions", [])
-    return [normalize_contribution(c) for c in raw_contribs]
+    return [
+        normalize_contribution(c, include_attachments=include_attachments)
+        for c in raw_contribs
+    ]
 
 
 @app.tool()
 async def get_event_sessions(
     event_id: Annotated[int, Field(description="Indico event ID.")],
+    include_attachments: Annotated[bool, Field(description="If true, include attachment metadata for contributions inside each session.")] = False,
     instance: Annotated[str | None, _instance_field()] = None,
 ) -> list[dict]:
     """
@@ -415,7 +452,10 @@ async def get_event_sessions(
         raise ValueError(f"Event {event_id} not found or not accessible.")
 
     raw_sessions = results[0].get("sessions", [])
-    return [normalize_session(s) for s in raw_sessions]
+    return [
+        normalize_session(s, include_attachments=include_attachments)
+        for s in raw_sessions
+    ]
 
 
 @app.tool()
