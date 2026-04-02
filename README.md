@@ -147,4 +147,4 @@ Substantial contributions will be recognised by adding the contributor as an aut
 
 Copyright (c) 2026 Christian Ohm. MIT License — see the [LICENSE](LICENSE) file.
 
-Indico itself is also [MIT licensed](https://github.com/indico/indico/blob/master/LICENSE).
+Indico itself is also [MIT licensed](https://github.com/indico/indico/blob/master/LICENSE), so this can perhaps be absorbed into that repository.
