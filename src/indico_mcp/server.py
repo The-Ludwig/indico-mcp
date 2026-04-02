@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Christian Ohm. MIT License — see LICENSE file.
 """
 Indico MCP Server
 

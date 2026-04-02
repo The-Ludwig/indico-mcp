@@ -8,12 +8,16 @@ Works with any Indico instance — configure multiple instances simultaneously a
 
 | Tool | Description |
 |------|-------------|
+| `search_categories` | Find categories by name; returns ID, breadcrumb path, and event count |
+| `find_events_by_title` | Search event titles across the whole instance; each result includes `category_id` — useful for discovering which category a meeting series belongs to |
+| `browse_category` | List direct subcategories of a category by ID; works without the REST API |
 | `search_category_events` | List events in a category, filtered by date range and keyword |
+| `get_category_contributions` | All contributions from every event in a category within a date range, in a single API call |
 | `get_event_details` | Full event metadata including all contributions |
 | `get_event_contributions` | Flat list of contributions: speakers, abstract, duration, track, session |
 | `get_event_sessions` | Session structure with nested contributions (full agenda view) |
 | `search_events_by_keyword` | Full-text search across events |
-| `list_category_info` | Category name, description, and subcategory IDs |
+| `list_category_info` | Category name, description, and direct subcategories with names |
 
 All tools accept an optional `instance` parameter to select which Indico server to query.
 
@@ -133,6 +137,14 @@ list_category_info(category_id=0, instance="su")
 
 The server uses the [Indico HTTP Export API](https://docs.getindico.io/en/stable/http-api/) (`/export/`) with `detail=contributions` and `detail=sessions` query parameters to retrieve structured agenda data. Authentication uses a standard `Authorization: Bearer <token>` header. The `/api/` endpoints in Indico are write-only (POST); all read operations go through `/export/`.
 
+## Contributing
+
+Feature requests and bug reports are welcome. Contributions are especially encouraged from Indico users who can test new functionality against a real instance before submitting a pull request — the Indico API has enough instance-to-instance variation that untested changes are hard to review reliably.
+
+Substantial contributions will be recognised by adding the contributor as an author.
+
 ## License
 
-MIT. Indico itself is also [MIT licensed](https://github.com/indico/indico/blob/master/LICENSE).
+Copyright (c) 2026 Christian Ohm. MIT License — see the [LICENSE](LICENSE) file.
+
+Indico itself is also [MIT licensed](https://github.com/indico/indico/blob/master/LICENSE).
