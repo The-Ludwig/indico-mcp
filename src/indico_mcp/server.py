@@ -994,19 +994,7 @@ async def book_room(
             "Multi-day bookings must be created via the Indico web interface."
         )
 
-    booking_params: dict[str, Any] = {
-        "room_id": room_id,
-        "from": from_dt,
-        "to": to_dt,
-        "reason": reason,
-    }
-    if booked_for is not None:
-        booking_params["booked_for"] = booked_for
-
-    if dry_run:
-        return {"dry_run": True, "would_book": booking_params}
-
-    client = _client(instance)
+    # Build the API payload first; booking_params derives from it for dry_run output.
     api_params: dict[str, Any] = {
         "roomid": room_id,
         "from": from_dt,
@@ -1015,6 +1003,20 @@ async def book_room(
     }
     if booked_for is not None:
         api_params["username"] = booked_for
+
+    if dry_run:
+        # Return a user-readable summary rather than the raw API key names.
+        display = {
+            "room_id": room_id,
+            "from": from_dt,
+            "to": to_dt,
+            "reason": reason,
+        }
+        if booked_for is not None:
+            display["booked_for"] = booked_for
+        return {"dry_run": True, "would_book": display}
+
+    client = _client(instance)
     try:
         return await client.post_form("roomBooking/bookRoom.json", **api_params)
     except IndicoError as e:
