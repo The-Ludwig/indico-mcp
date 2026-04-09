@@ -23,7 +23,10 @@ Run discover_rooms once to build a full catalogue; after that the cache is used 
 """
 
 import os
+import re
 from dataclasses import dataclass, field
+
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass
@@ -51,6 +54,11 @@ class Config:
             # Multi-instance mode
             names = [n.strip() for n in instances_env.split(",") if n.strip()]
             for name in names:
+                if not _SAFE_NAME_RE.match(name):
+                    raise ValueError(
+                        f"Instance name '{name}' is invalid. "
+                        "Names must contain only letters, digits, hyphens, and underscores."
+                    )
                 prefix = f"INDICO_{name.upper()}_"
                 url = os.getenv(f"{prefix}URL")
                 if not url:
