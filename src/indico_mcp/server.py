@@ -16,7 +16,6 @@ Tools:
   search_rooms               — find rooms by name and get their IDs (needed for book_room)
   list_room_locations        — list known room booking sites for this instance
   discover_rooms             — scan reservation history to build a local room catalogue
-  search_rooms               — find rooms by name and get their IDs (needed for book_room)
   find_available_rooms       — list rooms not booked in a given time window
   get_room_reservations      — list all reservations in a location within a time window
   book_room                  — create a room booking (requires write:legacy_api token scope)
@@ -33,7 +32,7 @@ import json
 import os
 import urllib.parse
 from contextlib import asynccontextmanager
-from datetime import date as date_, timedelta
+from datetime import date as date_, datetime as datetime_, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -149,6 +148,11 @@ name configured in Indico's room booking module exactly. If you don't know the n
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _enc(s: str) -> str:
+    """Percent-encode a string for safe use as a URL path segment."""
+    return urllib.parse.quote(s, safe="")
+
 
 def _rooms_cache_path(instance_name: str) -> Path:
     cache_dir = Path(os.getenv("INDICO_ROOMS_CACHE_DIR", Path.home() / ".indico_mcp"))
@@ -558,7 +562,7 @@ async def list_category_info(
 @app.tool()
 async def list_room_locations(
     instance: Annotated[str | None, _instance_field()] = None,
-) -> list[str]:
+) -> dict:
     """
     List all room booking locations (sites) known for this Indico instance.
 
@@ -566,16 +570,32 @@ async def list_room_locations(
     otherwise returns the locations configured via INDICO_*_ROOM_LOCATIONS.
     The location name is required by search_rooms, find_available_rooms,
     get_room_reservations, and book_room.
+
+    When reading from the cache the response also includes 'cache_updated'
+    (ISO date the cache was last refreshed) and 'cache_age_days' so the caller
+    can decide whether to re-run discover_rooms.
     """
     cfg = _config.get(instance) if _config else None
     instance_name = cfg.name if cfg else "default"
 
     cache = _load_rooms_cache(instance_name)
     if cache:
-        return sorted(cache.get("locations", {}).keys())
+        updated_str = cache.get("updated", "")
+        age_days: int | None = None
+        if updated_str:
+            try:
+                age_days = (date_.today() - date_.fromisoformat(updated_str)).days
+            except ValueError:
+                pass
+        result: dict = {"locations": sorted(cache.get("locations", {}).keys())}
+        if updated_str:
+            result["cache_updated"] = updated_str
+        if age_days is not None:
+            result["cache_age_days"] = age_days
+        return result
 
     if cfg and cfg.room_locations:
-        return sorted(cfg.room_locations)
+        return {"locations": sorted(cfg.room_locations)}
 
     raise ValueError(
         "No rooms cache found and no INDICO_*_ROOM_LOCATIONS configured. "
@@ -624,7 +644,7 @@ async def discover_rooms(
     for loc in scan_locations:
         try:
             data = await client.export(
-                f"reservation/{loc}",
+                f"reservation/{_enc(loc)}",
                 **{"from": from_dt, "to": to_dt},
             )
         except IndicoError as e:
@@ -653,7 +673,11 @@ async def discover_rooms(
         "updated": today.isoformat(),
         "locations": merged_locations,
     }
-    cache_path.write_text(json.dumps(cache, indent=2))
+    # Write atomically: write to a temp file first, then rename into place.
+    # This prevents a corrupt half-written cache if the process is interrupted.
+    tmp_path = cache_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(cache, indent=2))
+    tmp_path.rename(cache_path)
 
     total = sum(len(v) for v in catalogue.values())
     summary = f"Discovered {total} rooms across {len(catalogue)} location(s) → {cache_path}\n"
@@ -698,9 +722,13 @@ async def search_rooms(
             for r in rooms:
                 if name_filter is None or name_filter.lower() in r["full_name"].lower():
                     results.append({**r, "location": loc})
-        if results:
+        # When the requested location is definitively present in the cache, trust
+        # the cache result (returning an empty list if nothing matched). Only fall
+        # through to the live API when no location was specified and the cache
+        # returned nothing across all stored locations.
+        if results or location:
             return sorted(results, key=lambda r: r["full_name"])
-        # Cache miss — fall through to live API below (don't raise yet)
+        # location=None and cache returned nothing — fall through to live API
 
     # Slow path: live API scan (requires location)
     if not location:
@@ -715,7 +743,9 @@ async def search_rooms(
     # Only usable when a name_filter is given (empty name segment causes a 404).
     if name_filter:
         try:
-            rooms_data = await client.export(f"roomName/{location}/{name_filter}", limit=500)
+            rooms_data = await client.export(
+                f"roomName/{_enc(location)}/{_enc(name_filter)}", limit=500
+            )
             rooms = [
                 {"id": r["id"], "full_name": r.get("full_name") or r.get("name", ""), "location": location}
                 for r in (normalize_room(raw) for raw in extract_results(rooms_data))
@@ -734,7 +764,7 @@ async def search_rooms(
 
     try:
         data = await client.export(
-            f"reservation/{location}",
+            f"reservation/{_enc(location)}",
             **{"from": from_dt, "to": to_dt},
         )
     except IndicoError as e:
@@ -781,8 +811,29 @@ async def find_available_rooms(
     each with its numeric id (needed for book_room) and full_name.
 
     Use name_filter to narrow to a specific room or building wing.
+
+    Note: room discovery relies on past booking history. Rooms that have never been
+    booked in the past year will not appear in the results even if they are free.
+    If you believe a room is missing, try passing its name (or a fragment) via
+    name_filter, which triggers an additional direct room-name lookup.
     """
     client = _client(instance)
+
+    # Validate date and time inputs before making any API calls.
+    try:
+        datetime_.strptime(date, "%Y-%m-%d")
+        datetime_.strptime(from_time, "%H:%M")
+        datetime_.strptime(to_time, "%H:%M")
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid date or time format: {exc}. "
+            "Expected date=YYYY-MM-DD, from_time/to_time=HH:MM."
+        ) from exc
+    if from_time >= to_time:
+        raise ValueError(
+            f"from_time ({from_time}) must be earlier than to_time ({to_time})."
+        )
+
     from_dt = f"{date}T{from_time}"
     to_dt = f"{date}T{to_time}"
 
@@ -794,9 +845,9 @@ async def find_available_rooms(
 
     try:
         broad_data, window_data = await asyncio.gather(
-            client.export(f"reservation/{location}", **{"from": broad_from, "to": broad_to}),
-            client.export(f"reservation/{location}", **{"from": from_dt, "to": to_dt,
-                                                        "cancelled": "no", "rejected": "no"}),
+            client.export(f"reservation/{_enc(location)}", **{"from": broad_from, "to": broad_to}),
+            client.export(f"reservation/{_enc(location)}", **{"from": from_dt, "to": to_dt,
+                                                              "cancelled": "no", "rejected": "no"}),
         )
     except IndicoError as e:
         raise ValueError(
@@ -822,7 +873,9 @@ async def find_available_rooms(
     if not all_rooms and name_filter:
         # Reservation history found nothing — try roomName export directly
         try:
-            rooms_data = await client.export(f"roomName/{location}/{name_filter}", limit=500)
+            rooms_data = await client.export(
+                f"roomName/{_enc(location)}/{_enc(name_filter)}", limit=500
+            )
             for raw in extract_results(rooms_data):
                 r = normalize_room(raw)
                 rid = r.get("id")
@@ -866,7 +919,7 @@ async def get_room_reservations(
     client = _client(instance)
     try:
         data = await client.export(
-            f"reservation/{location}",
+            f"reservation/{_enc(location)}",
             **{"from": from_dt, "to": to_dt, "cancelled": "no", "rejected": "no"},
         )
     except IndicoError as e:
@@ -877,34 +930,95 @@ async def get_room_reservations(
 
 @app.tool()
 async def book_room(
-    room_id: Annotated[int, Field(description="Indico room ID (from find_available_rooms).")],
-    from_dt: Annotated[str, Field(description="Booking start, YYYY-MM-DDTHH:MM. Must be today.")],
-    to_dt: Annotated[str, Field(description="Booking end, YYYY-MM-DDTHH:MM. Must be same day as start.")],
+    room_id: Annotated[int, Field(description="Indico room ID (from search_rooms or find_available_rooms).")],
+    from_dt: Annotated[str, Field(description="Booking start, YYYY-MM-DDTHH:MM.")],
+    to_dt: Annotated[str, Field(description="Booking end, YYYY-MM-DDTHH:MM. Must be on the same day as start.")],
     reason: Annotated[str, Field(description="Reason for the booking.")],
-    booked_for: Annotated[str | None, Field(description="Username to book on behalf of (defaults to token owner).")] = None,
+    booked_for: Annotated[str | None, Field(
+        description=(
+            "Indico username to book on behalf of (defaults to the token owner). "
+            "Only pass this when the user has explicitly asked to book on behalf of "
+            "someone else — misuse may constitute impersonation."
+        )
+    )] = None,
+    dry_run: Annotated[bool, Field(
+        description=(
+            "When True, validate all inputs and return the booking parameters that "
+            "would be submitted without actually creating the booking. "
+            "Use this to confirm details with the user before committing."
+        )
+    )] = False,
     instance: Annotated[str | None, _instance_field()] = None,
 ) -> dict:
     """
     Create a room booking in Indico.
 
-    IMPORTANT CONSTRAINTS:
-    - The booking must start and end on the same day (Indico API limitation).
-    - The token must have the 'Classic API (read and write)' scope.
-    - The date must be today on the Indico server (same-day bookings only via this endpoint).
+    Always confirm the full details with the user before calling this tool
+    with dry_run=False, as the booking is created immediately and may be
+    difficult to cancel.
 
-    Returns the booking confirmation from Indico, including the reservation ID if successful.
+    IMPORTANT CONSTRAINTS:
+    - The booking must start and end on the same day (Indico API limitation for
+      this endpoint; recurring or multi-day bookings must be made via the web UI).
+    - The token must have the 'Classic API (read and write)' scope.
+    - Booking dates can be today or in the future; exact restrictions depend on
+      the Indico instance's room booking policy.
+
+    RETRY SAFETY: this endpoint is not idempotent. Submitting the same request
+    twice (e.g. after a transient network error) will create two separate bookings.
+    Use dry_run=True to pre-validate before committing, and do not retry
+    automatically on failure.
+
+    IMPERSONATION: the booked_for parameter allows booking on behalf of another
+    user. Only use it when the user has explicitly authorised this action.
+
+    Returns the booking confirmation from Indico, including the reservation ID if
+    successful. When dry_run=True, returns the parameters that would have been sent
+    without making any API call.
     """
-    client = _client(instance)
-    params: dict[str, Any] = {
+    # Validate datetime inputs regardless of dry_run.
+    try:
+        start = datetime_.fromisoformat(from_dt)
+        end = datetime_.fromisoformat(to_dt)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid datetime format: {exc}. Expected YYYY-MM-DDTHH:MM."
+        ) from exc
+    if start >= end:
+        raise ValueError(
+            f"Booking start ({from_dt}) must be before booking end ({to_dt})."
+        )
+    if start.date() != end.date():
+        raise ValueError(
+            f"Start ({from_dt}) and end ({to_dt}) must be on the same day. "
+            "Multi-day bookings must be created via the Indico web interface."
+        )
+
+    # Build the API payload first; booking_params derives from it for dry_run output.
+    api_params: dict[str, Any] = {
         "roomid": room_id,
         "from": from_dt,
         "to": to_dt,
         "reason": reason,
     }
     if booked_for is not None:
-        params["username"] = booked_for
+        api_params["username"] = booked_for
+
+    if dry_run:
+        # Return a user-readable summary rather than the raw API key names.
+        display = {
+            "room_id": room_id,
+            "from": from_dt,
+            "to": to_dt,
+            "reason": reason,
+        }
+        if booked_for is not None:
+            display["booked_for"] = booked_for
+        return {"dry_run": True, "would_book": display}
+
+    client = _client(instance)
     try:
-        return await client.post_form("roomBooking/bookRoom.json", **params)
+        return await client.post_form("roomBooking/bookRoom.json", **api_params)
     except IndicoError as e:
         raise ValueError(str(e)) from e
 
