@@ -111,6 +111,37 @@ class IndicoClient:
 
         return resp.json()
 
+    async def post_form(self, path: str, **data: object) -> dict:
+        """
+        POST /api/{path}  with form-encoded body.
+
+        Used for write operations such as room booking.
+        Requires a token with the 'write:legacy_api' scope.
+        """
+        clean_data = {k: str(v) for k, v in data.items() if v is not None}
+        url = f"{self._base_url}/api/{path.lstrip('/')}"
+        try:
+            resp = await self._http.post(url, data=clean_data)
+        except httpx.RequestError as exc:
+            raise IndicoError(f"Network error reaching {self._base_url}: {exc}") from exc
+
+        if resp.status_code == 401:
+            raise IndicoError(
+                "Authentication failed. The token needs the 'write:legacy_api' scope "
+                "to perform write operations.", 401
+            )
+        if resp.status_code == 403:
+            raise IndicoError(
+                "Access denied — ensure the token has the 'Classic API (read and write)' "
+                "scope enabled and that you have permission to book the requested room.", 403
+            )
+        if not resp.is_success:
+            raise IndicoError(
+                f"Indico returned HTTP {resp.status_code} for {url}", resp.status_code
+            )
+
+        return resp.json()
+
     async def get(self, path: str, **params: object) -> dict:
         """
         GET {base_url}/{path}  (arbitrary path, no prefix added)

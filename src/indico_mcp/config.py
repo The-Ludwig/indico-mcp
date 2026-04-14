@@ -10,14 +10,23 @@ Supports two env var patterns:
     INDICO_CERN_TOKEN=indp_xxx
     INDICO_SU_URL=https://indico.fysik.su.se
     INDICO_SU_TOKEN=indp_yyy
+    INDICO_SU_ROOM_LOCATIONS=AlbaNova,Albano Building 3,Fysikum
 
   Single-instance shorthand:
     INDICO_BASE_URL=https://indico.cern.ch
     INDICO_TOKEN=indp_xxx          # optional for public instances
+    INDICO_ROOM_LOCATIONS=Main Building,Building 40
+
+Room location names are the site names configured in Indico's room booking module.
+They seed the discover_rooms tool and are used as fallback when no rooms cache exists.
+Run discover_rooms once to build a full catalogue; after that the cache is used instead.
 """
 
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass
@@ -25,6 +34,11 @@ class InstanceConfig:
     name: str
     base_url: str
     token: str | None
+    room_locations: list[str] = field(default_factory=list)
+
+
+def _parse_locations(value: str) -> list[str]:
+    return [loc.strip() for loc in value.split(",") if loc.strip()]
 
 
 class Config:
@@ -40,6 +54,11 @@ class Config:
             # Multi-instance mode
             names = [n.strip() for n in instances_env.split(",") if n.strip()]
             for name in names:
+                if not _SAFE_NAME_RE.match(name):
+                    raise ValueError(
+                        f"Instance name '{name}' is invalid. "
+                        "Names must contain only letters, digits, hyphens, and underscores."
+                    )
                 prefix = f"INDICO_{name.upper()}_"
                 url = os.getenv(f"{prefix}URL")
                 if not url:
@@ -47,7 +66,11 @@ class Config:
                         f"INDICO_INSTANCES lists '{name}' but {prefix}URL is not set"
                     )
                 token = os.getenv(f"{prefix}TOKEN")
-                self._instances[name] = InstanceConfig(name=name, base_url=url.rstrip("/"), token=token)
+                room_locations = _parse_locations(os.getenv(f"{prefix}ROOM_LOCATIONS", ""))
+                self._instances[name] = InstanceConfig(
+                    name=name, base_url=url.rstrip("/"), token=token,
+                    room_locations=room_locations,
+                )
 
             default = os.getenv("INDICO_DEFAULT", names[0])
             if default not in self._instances:
@@ -64,8 +87,10 @@ class Config:
                     "INDICO_INSTANCES for multi-instance configuration."
                 )
             token = os.getenv("INDICO_TOKEN")
+            room_locations = _parse_locations(os.getenv("INDICO_ROOM_LOCATIONS", ""))
             self._instances["default"] = InstanceConfig(
-                name="default", base_url=url.rstrip("/"), token=token
+                name="default", base_url=url.rstrip("/"), token=token,
+                room_locations=room_locations,
             )
             self._default = "default"
 

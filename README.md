@@ -21,6 +21,12 @@ Works with any Indico instance — configure multiple instances simultaneously a
 | `list_category_info` | Category name, description, and direct subcategories with names |
 | `list_event_attachments` | Paginated attachments (`items` + `pagination`) for an event or contribution |
 | `download_attachment` | Download an attachment file to disk given its download URL |
+| `list_room_locations` | List known room booking sites for this instance |
+| `discover_rooms` | Scan reservation history to build a local room catalogue |
+| `search_rooms` | Find rooms by name and get their numeric IDs (needed for booking) |
+| `find_available_rooms` | List rooms not already booked in a given time window |
+| `get_room_reservations` | List all confirmed reservations in a location within a time window |
+| `book_room` | Create a room booking (requires Classic API write scope; same-day only) |
 
 All tools accept an optional `instance` parameter to select which Indico server to query.
 
@@ -66,6 +72,28 @@ INDICO_SU_TOKEN=indp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 `INDICO_DEFAULT` sets which instance is used when no `instance=` argument is passed to a tool. Tokens are optional for public-only access.
+
+### Room booking setup
+
+Room booking tools (`search_rooms`, `find_available_rooms`, `book_room`) require knowing the **site name** as configured in Indico's room booking module. These names are not discoverable via the API — you must look them up in the Indico room booking interface (they appear as location headings, e.g. `"AlbaNova Main Building"`, `"Albano Building 3"`).
+
+#### 1. Configure site names
+
+Add the known site names to your `.env`:
+
+```
+INDICO_SU_ROOM_LOCATIONS=AlbaNova Main Building,Albano Building 3
+```
+
+For single-instance: `INDICO_ROOM_LOCATIONS=Main Building,Building 40`
+
+#### 2. Run room discovery
+
+Once site names are configured, run `discover_rooms` once (e.g. by asking your agent to do it). This scans reservation history across all configured sites and saves a local room catalogue to `~/.indico_mcp/{instance}_rooms.json` (override the directory with `INDICO_ROOMS_CACHE_DIR`).
+
+After discovery, `search_rooms` finds rooms by partial name across all catalogued sites without needing a location argument. Rooms with no booking history are found on-the-fly via Indico's room name search endpoint, so discovery does not need to be exhaustive.
+
+Re-run `discover_rooms` periodically (or whenever new rooms are added) to keep the catalogue fresh. The agent will offer to run it automatically if the cache file is missing when a room operation is requested.
 
 ### Getting a token
 
