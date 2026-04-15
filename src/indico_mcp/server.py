@@ -565,10 +565,10 @@ async def search_events_by_keyword(
         raw_events = events_block.get("results", [])
         if raw_events:
             return [normalize_event(e) for e in raw_events[:limit]]
-    except IndicoError:
-        # Some instances do not expose read endpoints under /api/ (often 404/405/403).
-        # Fall through to legacy export search for broad compatibility.
-        pass
+    except IndicoError as e:
+        if e.status_code != 404:
+            raise ValueError(str(e)) from e
+        # 404: modern search endpoint not available on this instance, fall through to legacy
 
     # Legacy: search via the export title-search endpoint
     try:
@@ -607,10 +607,10 @@ async def list_category_info(
                 for c in data.get("subcategories", [])
             ] or None,
         }.items() if v is not None}
-    except IndicoError:
-        # API category reads are not consistently available across instances.
-        # Fall through to export for compatibility.
-        pass
+    except IndicoError as e:
+        if e.status_code != 404:
+            raise ValueError(str(e)) from e
+        # 404: REST categories endpoint not available on this instance, fall through to export
 
     # Fallback: infer from a minimal export call
     try:
